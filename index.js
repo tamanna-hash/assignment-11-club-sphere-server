@@ -26,19 +26,18 @@ app.use(express.json());
 
 // jwt middlewares
 const verifyJWT = async (req, res, next) => {
-  const token = req?.headers?.authorization?.split(' ')[1]
-  console.log(token)
-  if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
+  const token = req?.headers?.authorization?.split(" ")[1];
+
+  if (!token) return res.status(401).send({ message: "Unauthorized Access!" });
   try {
-    const decoded = await admin.auth().verifyIdToken(token)
-    req.tokenEmail = decoded.email
-    console.log(decoded)
-    next()
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.tokenEmail = decoded.email;
+    next();
   } catch (err) {
-    console.log(err)
-    return res.status(401).send({ message: 'Unauthorized Access!', err })
+    console.log(err);
+    return res.status(401).send({ message: "Unauthorized Access!", err });
   }
-}
+};
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(process.env.MONGODB_URI, {
@@ -55,6 +54,28 @@ async function run() {
     const membershipCollection = db.collection("memberships");
     const paymentCollection = db.collection("payments");
     const userCollection = db.collection("users");
+    const managerRequestCollection = db.collection("managerRequests");
+     // role middlewares
+    const verifyADMIN = async (req, res, next) => {
+      const email = req.tokenEmail
+      const user = await userCollection.findOne({ email })
+      if (user?.role !== 'admin')
+        return res
+          .status(403)
+          .send({ message: 'Admin only Actions!', role: user?.role })
+
+      next()
+    }
+    const verifyMANAGER = async (req, res, next) => {
+      const email = req.tokenEmail
+      const user = await userCollection.findOne({ email })
+      if (user?.role !== 'manager')
+        return res
+          .status(403)
+          .send({ message: 'Manager only Actions!', role: user?.role })
+
+      next()
+    }
     // club apis
     // get all clubs
     app.get("/clubs", async (req, res) => {
@@ -73,11 +94,19 @@ async function run() {
       res.send(result);
     });
     // post club
-    app.post("/clubs", async (req, res) => {
+    app.post("/clubs",verifyJWT,verifyMANAGER, async (req, res) => {
       const clubData = req.body;
       clubData.created_at = new Date();
       clubData.status = "pending";
       const result = await clubCollection.insertOne(clubData);
+      res.send(result);
+    });
+    // get all clubs for manager by email
+    app.get("/my-inventory/:email",verifyJWT,verifyMANAGER, async (req, res) => {
+      const email = req.params.email;
+      const result = await clubCollection
+        .find({ "manager.email": email })
+        .toArray();
       res.send(result);
     });
     // stripe checkout session
@@ -158,30 +187,22 @@ async function run() {
         membershipId: membership._id,
       });
     });
-
+    // memberships apis
     //  get all memberships for a customer by email
-    app.get("/my-memberships/:email", async (req, res) => {
-      const email = req.params.email;
+    app.get("/my-memberships", verifyJWT, async (req, res) => {
       const result = await membershipCollection
-        .find({ member: email })
+        .find({ member: req.tokenEmail })
         .toArray();
       res.send(result);
     });
-    app.get("/manage-memberships/:email", async (req, res) => {
+    app.get("/manage-memberships/:email",verifyJWT,verifyMANAGER, async (req, res) => {
       const email = req.params.email;
       const result = await membershipCollection
         .find({ "manager.email": email })
         .toArray();
       res.send(result);
     });
-    // get all clubs for manager by email
-    app.get("/my-inventory/:email", async (req, res) => {
-      const email = req.params.email;
-      const result = await clubCollection
-        .find({ "manager.email": email })
-        .toArray();
-      res.send(result);
-    });
+    // user apis
     // save or update a user in db
     app.post("/user", async (req, res) => {
       const userData = req.body;
@@ -210,19 +231,50 @@ async function run() {
       const result = await userCollection.insertOne(userData);
       res.send(result);
     });
-    app.get('/users',async(req,res)=>{
-      const result = await userCollection.find().toArray()
-      res.send (result)
-    })
-  // get a user's role
-    app.get('/user/role/:email', async (req, res) => {
-      const result = await userCollection.findOne({ email: req.params.email})
-      res.send({ role: result?.role })
-    })
+    // get all users for admin
+    app.get("/users", verifyJWT,verifyADMIN, async (req, res) => {
+      const adminEmail = req.tokenEmail;
+      console.log(adminEmail);
+      const result = await userCollection
+        .find({ email: { $ne: adminEmail } })
+        .toArray();
+      res.send(result);
+    });
+    // get a user's role
+    app.get("/user/role", verifyJWT, async (req, res) => {
+      //  console.log(req.tokenEmail)
+      const result = await userCollection.findOne({ email: req.tokenEmail });
+      res.send({ role: result?.role });
+    });
 
+    // save become-manager request
+    app.post("/become-manager", verifyJWT, async (req, res) => {
+      const email = req.tokenEmail;
+      const alreadyExists = await managerRequestCollection.findOne({ email });
+      if (alreadyExists)
+        return res.status(409).send({
+          message: "Already requested,please wait for admin approval.",
+        });
+      const result = managerRequestsCollection.insertOne({ email });
+      res.send(result);
+    });
+    // get all manager requests for admin
+    app.get("/manager-requests", verifyJWT, async (req, res) => {
+      const result = await managerRequestCollection.find().toArray();
+      res.send(result);
+    });
 
+    // update a user's role
+    app.patch("/update-role", verifyJWT,verifyADMIN, async (req, res) => {
+      const { email, role } = req.body;
+      const result = await userCollection.updateOne(
+        { email },
+        { $set: { role } }
+      );
+      await managerRequestCollection.deleteOne({ email });
 
-    
+      res.send(result);
+    });
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
