@@ -25,20 +25,20 @@ app.use(
 app.use(express.json());
 
 // jwt middlewares
-// const verifyJWT = async (req, res, next) => {
-//   const token = req?.headers?.authorization?.split(' ')[1]
-//   console.log(token)
-//   if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
-//   try {
-//     const decoded = await admin.auth().verifyIdToken(token)
-//     req.tokenEmail = decoded.email
-//     console.log(decoded)
-//     next()
-//   } catch (err) {
-//     console.log(err)
-//     return res.status(401).send({ message: 'Unauthorized Access!', err })
-//   }
-// }
+const verifyJWT = async (req, res, next) => {
+  const token = req?.headers?.authorization?.split(' ')[1]
+  console.log(token)
+  if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
+  try {
+    const decoded = await admin.auth().verifyIdToken(token)
+    req.tokenEmail = decoded.email
+    console.log(decoded)
+    next()
+  } catch (err) {
+    console.log(err)
+    return res.status(401).send({ message: 'Unauthorized Access!', err })
+  }
+}
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(process.env.MONGODB_URI, {
