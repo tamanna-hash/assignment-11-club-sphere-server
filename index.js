@@ -55,32 +55,43 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const userCollection = db.collection("users");
     const managerRequestCollection = db.collection("managerRequests");
-     // role middlewares
+    const clubRequestCollection = db.collection("clubRequests");
+    // role middlewares
     const verifyADMIN = async (req, res, next) => {
-      const email = req.tokenEmail
-      const user = await userCollection.findOne({ email })
-      if (user?.role !== 'admin')
+      const email = req.tokenEmail;
+      const user = await userCollection.findOne({ email });
+      if (user?.role !== "admin")
         return res
           .status(403)
-          .send({ message: 'Admin only Actions!', role: user?.role })
+          .send({ message: "Admin only Actions!", role: user?.role });
 
-      next()
-    }
+      next();
+    };
     const verifyMANAGER = async (req, res, next) => {
-      const email = req.tokenEmail
-      const user = await userCollection.findOne({ email })
-      if (user?.role !== 'manager')
+      const email = req.tokenEmail;
+      const user = await userCollection.findOne({ email });
+      if (user?.role !== "manager")
         return res
           .status(403)
-          .send({ message: 'Manager only Actions!', role: user?.role })
+          .send({ message: "Manager only Actions!", role: user?.role });
 
-      next()
-    }
+      next();
+    };
     // club apis
     // get all clubs
     app.get("/clubs", async (req, res) => {
       const query = {};
       const result = await clubCollection.find(query).toArray();
+      res.send(result);
+    });
+    // update club
+    app.patch("/clubs/:id", async (req, res) => {
+      const{id}=req.params
+      const clubData=req.body
+      const query = {_id:new ObjectId(id)};
+      delete clubData._id;
+      const updatedData = { $set: clubData };
+      const result = await clubCollection.updateOne(query,updatedData);
       res.send(result);
     });
     // single club api
@@ -94,21 +105,81 @@ async function run() {
       res.send(result);
     });
     // post club
-    app.post("/clubs",verifyJWT,verifyMANAGER, async (req, res) => {
+    app.post("/club-requests", verifyJWT, verifyMANAGER, async (req, res) => {
       const clubData = req.body;
       clubData.created_at = new Date();
       clubData.status = "pending";
-      const result = await clubCollection.insertOne(clubData);
+      const result = await clubRequestCollection.insertOne(clubData);
       res.send(result);
     });
-    // get all clubs for manager by email
-    app.get("/my-inventory/:email",verifyJWT,verifyMANAGER, async (req, res) => {
-      const email = req.params.email;
-      const result = await clubCollection
+    // post approve club
+    app.post("/clubs-approve/:id", verifyJWT, verifyADMIN, async (req, res) => {
+      const club = req.body;
+      const id = req.params.id;
+
+      delete club._id;
+      club.status = "approved";
+      // Try both ObjectId and string
+      let filter;
+      try {
+        filter = { _id: new ObjectId(id) };
+      } catch {
+        filter = { _id: id };
+      }
+
+      const insertResult = await clubCollection.insertOne(club);
+      const deleteResult = await clubRequestCollection.deleteOne(filter);
+
+      res.send({ inserted: insertResult, deleted: deleteResult });
+    });
+    // get all club requests for admin
+    app.get("/club-requests", verifyJWT, verifyADMIN, async (req, res) => {
+      const result = await clubRequestCollection.find().toArray();
+      res.send(result);
+    });
+    // get all club requests for manager by email
+    app.get("/clubs-pending", verifyJWT, verifyMANAGER, async (req, res) => {
+      const email = req.tokenEmail;
+      const result = await clubRequestCollection
         .find({ "manager.email": email })
         .toArray();
       res.send(result);
     });
+    // get single club requests for manager by email
+    app.get(
+      "/clubs-pending/:id",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const id = req.params.id;
+        const email = req.tokenEmail;
+
+        const query = { _id: new ObjectId(id) };
+        const result = await clubRequestCollection.findOne(query);
+
+        if (!result) return res.status(404).send("Not found");
+
+        if (result.manager.email !== email) {
+          return res.status(401).send("Unauthorized");
+        }
+
+        res.send(result);
+      }
+    );
+
+    // get all clubs for manager by email
+    app.get(
+      "/my-inventory/:email",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const email = req.params.email;
+        const result = await clubCollection
+          .find({ "manager.email": email })
+          .toArray();
+        res.send(result);
+      }
+    );
     // stripe checkout session
     app.post("/create-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
@@ -138,6 +209,7 @@ async function run() {
       });
       res.send({ url: session.url });
     });
+    // after payment insert the member in collection
     app.post("/payment-success", async (req, res) => {
       const { sessionId } = req.body;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
@@ -187,6 +259,7 @@ async function run() {
         membershipId: membership._id,
       });
     });
+
     // memberships apis
     //  get all memberships for a customer by email
     app.get("/my-memberships", verifyJWT, async (req, res) => {
@@ -195,13 +268,18 @@ async function run() {
         .toArray();
       res.send(result);
     });
-    app.get("/manage-memberships/:email",verifyJWT,verifyMANAGER, async (req, res) => {
-      const email = req.params.email;
-      const result = await membershipCollection
-        .find({ "manager.email": email })
-        .toArray();
-      res.send(result);
-    });
+    app.get(
+      "/manage-memberships/:email",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const email = req.params.email;
+        const result = await membershipCollection
+          .find({ "manager.email": email })
+          .toArray();
+        res.send(result);
+      }
+    );
     // user apis
     // save or update a user in db
     app.post("/user", async (req, res) => {
@@ -232,7 +310,7 @@ async function run() {
       res.send(result);
     });
     // get all users for admin
-    app.get("/users", verifyJWT,verifyADMIN, async (req, res) => {
+    app.get("/users", verifyJWT, verifyADMIN, async (req, res) => {
       const adminEmail = req.tokenEmail;
       console.log(adminEmail);
       const result = await userCollection
@@ -255,17 +333,17 @@ async function run() {
         return res.status(409).send({
           message: "Already requested,please wait for admin approval.",
         });
-      const result = managerRequestsCollection.insertOne({ email });
+      const result = managerRequestCollection.insertOne({ email });
       res.send(result);
     });
     // get all manager requests for admin
-    app.get("/manager-requests", verifyJWT, async (req, res) => {
+    app.get("/manager-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await managerRequestCollection.find().toArray();
       res.send(result);
     });
 
     // update a user's role
-    app.patch("/update-role", verifyJWT,verifyADMIN, async (req, res) => {
+    app.patch("/update-role", verifyJWT, verifyADMIN, async (req, res) => {
       const { email, role } = req.body;
       const result = await userCollection.updateOne(
         { email },
