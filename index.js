@@ -86,12 +86,12 @@ async function run() {
     });
     // update club
     app.patch("/clubs/:id", async (req, res) => {
-      const{id}=req.params
-      const clubData=req.body
-      const query = {_id:new ObjectId(id)};
+      const { id } = req.params;
+      const clubData = req.body;
+      const query = { _id: new ObjectId(id) };
       delete clubData._id;
       const updatedData = { $set: clubData };
-      const result = await clubCollection.updateOne(query,updatedData);
+      const result = await clubCollection.updateOne(query, updatedData);
       res.send(result);
     });
     // single club api
@@ -102,6 +102,7 @@ async function run() {
       //     query.id = { _id: new ObjectId(id) };
       //   }
       const result = await clubCollection.findOne(query);
+      console.log(result);
       res.send(result);
     });
     // post club
@@ -132,6 +133,17 @@ async function run() {
 
       res.send({ inserted: insertResult, deleted: deleteResult });
     });
+    app.delete(
+      "/clubs-reject/:id",
+      verifyJWT,
+      verifyADMIN,
+      async (req, res) => {
+        const { id } = req.params;
+        const filter = { _id: new ObjectId(id) };
+        const result = await clubRequestCollection.deleteOne(filter);
+        res.send(result);
+      }
+    );
     // get all club requests for admin
     app.get("/club-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await clubRequestCollection.find().toArray();
@@ -145,7 +157,7 @@ async function run() {
         .toArray();
       res.send(result);
     });
-    // get single club requests for manager by email
+    // get single club requests for manager by id
     app.get(
       "/clubs-pending/:id",
       verifyJWT,
@@ -162,7 +174,24 @@ async function run() {
         if (result.manager.email !== email) {
           return res.status(401).send("Unauthorized");
         }
-
+        res.send(result);
+      }
+    );
+    app.patch(
+      "/clubs-pending/:id",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const { id } = req.params;
+        const clubData = req.body;
+        console.log(clubData);
+        const query = { _id: new ObjectId(id) };
+        delete clubData._id;
+        const updatedData = { $set: clubData };
+        const result = await clubRequestCollection.updateOne(
+          query,
+          updatedData
+        );
         res.send(result);
       }
     );
@@ -183,6 +212,11 @@ async function run() {
     // stripe checkout session
     app.post("/create-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
+      const { paymentId } = paymentInfo;
+      const alreadyPaid = await paymentCollection.findOne({ paymentId });
+      if (alreadyPaid) {
+        return res.send({ message: "Already paid" });
+      }
       const session = await stripe.checkout.sessions.create({
         line_items: [
           {
@@ -259,7 +293,18 @@ async function run() {
         membershipId: membership._id,
       });
     });
-
+    // get all payments for admin
+    app.get("/all-payments", verifyJWT, verifyADMIN, async (req, res) => {
+      const result = await paymentCollection.find().toArray();
+      res.send(result);
+    });
+    // get payments for manager by email
+    app.get("/manager-payments", verifyJWT, verifyMANAGER, async (req, res) => {
+      const email = req.tokenEmail;
+      const query = { "manager.email": email };
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result);
+    });
     // memberships apis
     //  get all memberships for a customer by email
     app.get("/my-memberships", verifyJWT, async (req, res) => {
@@ -268,16 +313,56 @@ async function run() {
         .toArray();
       res.send(result);
     });
+    // get all memberships for manager by email
     app.get(
-      "/manage-memberships/:email",
+      "/manage-memberships",
       verifyJWT,
       verifyMANAGER,
       async (req, res) => {
-        const email = req.params.email;
+        const email = req.tokenEmail;
         const result = await membershipCollection
           .find({ "manager.email": email })
           .toArray();
         res.send(result);
+      }
+    );
+    app.patch(
+      "/manage-membership/:id",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const { id } = req.params;
+        const query = { _id: new ObjectId(id) };
+        const updatedData = {
+          $set: {
+            status: "joined",
+            joined_at:new Date()
+          },
+        };
+        const result = await membershipCollection.updateOne(query, updatedData);
+        res.send(result);
+      }
+    );
+    app.delete(
+      "/membership-reject/:id",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const query = { _id: new ObjectId(id) };
+
+          const result = await membershipCollection.deleteOne(query);
+
+          if (result.deletedCount === 0) {
+            return res.status(404).send({ message: "Membership not found" });
+          }
+
+          res.send({ message: "Membership deleted successfully", result });
+        } catch (error) {
+          console.error(error);
+          res.status(500).send({ message: "Internal Server Error", error });
+        }
       }
     );
     // user apis
