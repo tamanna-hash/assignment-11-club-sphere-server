@@ -51,7 +51,9 @@ async function run() {
   try {
     const db = client.db("clubSphereDB");
     const clubCollection = db.collection("clubs");
+    const eventCollection = db.collection("events");
     const membershipCollection = db.collection("memberships");
+    const eventRegisterCollection = db.collection("eventRegisters");
     const paymentCollection = db.collection("payments");
     const userCollection = db.collection("users");
     const managerRequestCollection = db.collection("managerRequests");
@@ -84,7 +86,7 @@ async function run() {
       const result = await clubCollection.find(query).toArray();
       res.send(result);
     });
-    // update club
+    // update club for manager
     app.patch("/clubs/:id", async (req, res) => {
       const { id } = req.params;
       const clubData = req.body;
@@ -133,6 +135,7 @@ async function run() {
 
       res.send({ inserted: insertResult, deleted: deleteResult });
     });
+    // delete club request for admin
     app.delete(
       "/clubs-reject/:id",
       verifyJWT,
@@ -209,6 +212,163 @@ async function run() {
         res.send(result);
       }
     );
+    // delete single club for manager by id
+    app.delete(
+      "/clubs-delete/:id",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const query = { _id: new ObjectId(id) };
+
+          const result = await clubCollection.deleteOne(query);
+
+          if (result.deletedCount === 0) {
+            return res.status(404).send({ message: "club not found" });
+          }
+
+          res.send({ message: "club deleted successfully", result });
+        } catch (error) {
+          console.error(error);
+          res.status(500).send({ message: "Internal Server Error", error });
+        }
+      }
+    );
+    // event api
+    app.post("/events", verifyJWT, verifyMANAGER, async (req, res) => {
+      const eventData = req.body;
+      console.log(eventData);
+      eventData.created_at = new Date();
+      const result = await eventCollection.insertOne(eventData);
+      res.send(result);
+    });
+    // get all events public
+    app.get("/events", async (req, res) => {
+      const result = await eventCollection.find().toArray();
+      res.send(result);
+    });
+    // get all events for manager by their email
+    app.get("/events-secure", verifyJWT, verifyMANAGER, async (req, res) => {
+      const email = req.tokenEmail;
+      const query = { "manager.email": email };
+      const result = await eventCollection.find(query).toArray();
+      res.send(result);
+    });
+    // update single event for manager
+    app.patch("/events/:id", async (req, res) => {
+      const { id } = req.params;
+      const eventData = req.body;
+      const query = { _id: new ObjectId(id) };
+      delete eventData._id;
+      const updatedData = { $set: eventData };
+      const result = await eventCollection.updateOne(query, updatedData);
+      res.send(result);
+    });
+
+    app.post("/event-registration", async (req, res) => {
+      const { eventId, userEmail, clubId, manager } = req.body;
+      // check if already joined
+      console.log(req.body);
+      const existing = await eventRegisterCollection.findOne({
+        eventId,
+        userEmail,
+      });
+
+      if (existing) {
+        return res.status(409).send({
+          message: "You already joined this event",
+          alreadyJoined: true,
+        });
+      }
+
+      const eventRegisterData = {
+        eventId,
+        userEmail,
+        clubId,
+        manager,
+        status: "registered",
+        registeredAt: new Date(),
+      };
+
+      const result = await eventRegisterCollection.insertOne(eventRegisterData);
+      res.send(result);
+    });
+    app.get(
+      "/event-registrations",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const email = req.tokenEmail;
+        const query = { "manager.email": email };
+        const result = await eventRegisterCollection.find(query).toArray();
+        res.send(result);
+      }
+    );
+    app.patch(
+      "/event-register-remove/:id",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const managerEmail = req.tokenEmail;
+        const { id } = req.params;
+
+        // find registration
+        const registration = await eventRegisterCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!registration) {
+          return res.status(404).send({ message: "Registration not found" });
+        }
+        // if already cancelled
+        if (registration.status === "cancelled") {
+          return res
+            .status(400)
+            .send({ message: "Registration Already Cancelled" });
+        }
+        // check event ownership
+        const event = await eventCollection.findOne({
+          _id: new ObjectId(registration.eventId),
+          "manager.email": managerEmail,
+        });
+
+        if (!event) {
+          return res.status(403).send({ message: "Not authorized" });
+        }
+
+        const result = await eventRegisterCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "cancelled",
+              cancelledAt: new Date(),
+            },
+          }
+        );
+
+        res.send(result);
+      }
+    );
+
+    app.get("/event-registration/status", async (req, res) => {
+      const { eventId, email } = req.query;
+
+      const joined = await eventRegisterCollection.findOne({
+        eventId,
+        userEmail: email,
+      });
+
+      res.send({ joined: !!joined });
+    });
+    // get single club api
+    // single club api
+    app.get("/events/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await eventCollection.findOne(query);
+      res.send(result);
+    });
     // stripe checkout session
     app.post("/create-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
@@ -326,6 +486,7 @@ async function run() {
         res.send(result);
       }
     );
+    // update membership data after approve
     app.patch(
       "/manage-membership/:id",
       verifyJWT,
@@ -336,13 +497,14 @@ async function run() {
         const updatedData = {
           $set: {
             status: "joined",
-            joined_at:new Date()
+            joined_at: new Date(),
           },
         };
         const result = await membershipCollection.updateOne(query, updatedData);
         res.send(result);
       }
     );
+    // delete membership data if reject
     app.delete(
       "/membership-reject/:id",
       verifyJWT,
