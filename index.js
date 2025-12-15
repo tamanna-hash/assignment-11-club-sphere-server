@@ -82,9 +82,50 @@ async function run() {
     // club apis
     // get all clubs
     app.get("/clubs", async (req, res) => {
-      const query = {};
-      const result = await clubCollection.find(query).toArray();
-      res.send(result);
+      try {
+        const { search = "", category, sort } = req.query;
+
+        const query = {};
+
+        // 🔍 Search by clubName
+        if (search) {
+          query.clubName = { $regex: search, $options: "i" };
+        }
+
+        // 🏷️ Filter by category
+        if (category && category !== "all") {
+          query.category = category;
+        }
+
+        // 🔃 Sorting logic
+        let sortOption = {};
+        switch (sort) {
+          case "newest":
+            sortOption = { created_at: -1 };
+            break;
+          case "oldest":
+            sortOption = { created_at: 1 };
+            break;
+          case "highest-fee":
+            sortOption = { membershipFee: -1 };
+            break;
+          case "lowest-fee":
+            sortOption = { membershipFee: 1 };
+            break;
+          default:
+            sortOption = { created_at: -1 }; // default newest
+        }
+
+        const result = await clubCollection
+          .find(query)
+          .sort(sortOption)
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to fetch clubs" });
+      }
     });
     // update club for manager
     app.patch("/clubs/:id", async (req, res) => {
@@ -104,7 +145,6 @@ async function run() {
       //     query.id = { _id: new ObjectId(id) };
       //   }
       const result = await clubCollection.findOne(query);
-      console.log(result);
       res.send(result);
     });
     // post club
@@ -180,6 +220,23 @@ async function run() {
         res.send(result);
       }
     );
+    app.get("/my-joined-clubs", verifyJWT, async (req, res) => {
+      try {
+        const userEmail = req.tokenEmail;
+
+        const joinedClubs = await membershipCollection
+          .find({
+            member: userEmail,
+            status: "joined",
+          })
+          .toArray();
+
+        res.send(joinedClubs);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to fetch joined clubs" });
+      }
+    });
     app.patch(
       "/clubs-pending/:id",
       verifyJWT,
@@ -235,6 +292,56 @@ async function run() {
         }
       }
     );
+    // get all club for admin dashboard statistics
+    app.get("/admin/clubs", verifyJWT, verifyADMIN, async (req, res) => {
+      const result = await clubCollection
+        .aggregate([
+          // 🔹 Convert club _id to string for matching
+          {
+            $addFields: {
+              clubIdStr: { $toString: "$_id" },
+            },
+          },
+
+          // 🔹 Lookup memberships (clubId is string)
+          {
+            $lookup: {
+              from: "memberships",
+              localField: "clubIdStr",
+              foreignField: "clubId",
+              as: "members",
+            },
+          },
+
+          // 🔹 Lookup events (clubId is string)
+          {
+            $lookup: {
+              from: "events",
+              localField: "clubIdStr",
+              foreignField: "clubId",
+              as: "events",
+            },
+          },
+
+          // 🔹 Count
+          {
+            $addFields: {
+              membersCount: { $size: "$members" },
+              eventsCount: { $size: "$events" },
+            },
+          },
+
+          // 🔹 Optional: remove temp field
+          {
+            $project: {
+              clubIdStr: 0,
+            },
+          },
+        ])
+        .toArray();
+
+      res.send(result);
+    });
     // event api
     app.post("/events", verifyJWT, verifyMANAGER, async (req, res) => {
       const eventData = req.body;
@@ -245,8 +352,79 @@ async function run() {
     });
     // get all events public
     app.get("/events", async (req, res) => {
-      const result = await eventCollection.find().toArray();
-      res.send(result);
+      try {
+        const { search = "", clubId, isPaid, sort } = req.query;
+
+        const query = {};
+
+        // 🔗 Filter by club
+        if (clubId) {
+          query.clubId = clubId;
+        }
+
+        // 🔍 Search by title
+        if (search) {
+          query.title = { $regex: search, $options: "i" };
+        }
+
+        // 💰 Filter paid/free
+        if (isPaid === "true") query.isPaid = true;
+        if (isPaid === "false") query.isPaid = false;
+
+        // 🔃 Sorting
+        let sortOption = {};
+        switch (sort) {
+          case "newest":
+            sortOption = { created_at: -1 };
+            break;
+          case "oldest":
+            sortOption = { created_at: 1 };
+            break;
+          case "event-soon":
+            sortOption = { eventDate: 1 };
+            break;
+          case "event-late":
+            sortOption = { eventDate: -1 };
+            break;
+          default:
+            sortOption = { created_at: -1 };
+        }
+
+        const events = await eventCollection
+          .find(query)
+          .sort(sortOption)
+          .toArray();
+
+        res.send(events);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to fetch events" });
+      }
+    });
+
+    // get events for members they are joined
+    app.get("/my-joined-events", verifyJWT, async (req, res) => {
+      const userEmail = req.tokenEmail;
+      const registrations = await eventRegisterCollection
+        .find({ userEmail, status: "registered" })
+        .toArray();
+      const eventIds = registrations.map((r) => new ObjectId(r.eventId));
+      const events = await eventCollection
+        .find({ _id: { $in: eventIds } })
+        .toArray();
+      const joinedEvents = events.map((event) => {
+        const registration = registrations.find(
+          (r) => r.eventId === event._id.toString()
+        );
+        return {
+          ...event,
+          status: registration.status,
+          registeredAt: registration.registeredAt,
+          cancelledAt: registration.cancelledAt || null,
+        };
+      });
+
+      res.send(joinedEvents);
     });
     // get all events for manager by their email
     app.get("/events-secure", verifyJWT, verifyMANAGER, async (req, res) => {
@@ -256,7 +434,7 @@ async function run() {
       res.send(result);
     });
     // update single event for manager
-    app.patch("/events/:id", async (req, res) => {
+    app.patch("/events/:id", verifyJWT, verifyMANAGER, async (req, res) => {
       const { id } = req.params;
       const eventData = req.body;
       const query = { _id: new ObjectId(id) };
@@ -372,10 +550,19 @@ async function run() {
     // stripe checkout session
     app.post("/create-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
-      const { paymentId } = paymentInfo;
-      const alreadyPaid = await paymentCollection.findOne({ paymentId });
-      if (alreadyPaid) {
-        return res.send({ message: "Already paid" });
+      const { clubId, memberEmail } = paymentInfo;
+
+      // 1. check existing payment FIRST
+      const existingPayment = await paymentCollection.findOne({
+        clubId,
+        transactionId: transactionId,
+      });
+
+      if (existingPayment) {
+        return res.status(400).send({
+          message: "You have already paid for this club",
+          transactionId: existingPayment.transactionId,
+        });
       }
       const session = await stripe.checkout.sessions.create({
         line_items: [
@@ -407,6 +594,16 @@ async function run() {
     app.post("/payment-success", async (req, res) => {
       const { sessionId } = req.body;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
+      const transactionId = session.payment_intent;
+      const query = { transactionId: transactionId };
+      const paymentExist = await paymentCollection.findOne(query);
+      if (paymentExist) {
+        return res.send({
+          message: "already exist",
+          trackingId: paymentExist.trackingId,
+          transactionId,
+        });
+      }
       const club = await clubCollection.findOne({
         _id: new ObjectId(session.metadata.clubId),
       });
@@ -452,6 +649,12 @@ async function run() {
         transactionId: session.payment_intent,
         membershipId: membership._id,
       });
+    });
+    // post for free membership
+    app.post("/membership-free", async (req, res) => {
+      const membershipInfo = req.body;
+      const result = await membershipCollection.insertOne(membershipInfo);
+      res.send(result);
     });
     // get all payments for admin
     app.get("/all-payments", verifyJWT, verifyADMIN, async (req, res) => {
@@ -599,6 +802,211 @@ async function run() {
       await managerRequestCollection.deleteOne({ email });
 
       res.send(result);
+    });
+    app.get("/admin-summary", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+
+        // Total users
+        const totalUsers = await db.collection("users").countDocuments();
+
+        // Total clubs
+        const pendingClubs = await db
+          .collection("clubRequests")
+          .countDocuments({ status: "pending" });
+
+        const approvedClubs = await db
+          .collection("clubs")
+          .countDocuments({ status: "approved" });
+
+        const clubsSummary = {
+          pending: pendingClubs,
+          approved: approvedClubs,
+        };
+        // Total memberships
+        const totalMemberships = await db
+          .collection("memberships")
+          .countDocuments();
+
+        // Total events
+        const totalEvents = await db.collection("events").countDocuments();
+
+        // Total payments amount
+        const paymentsAgg = await db
+          .collection("payments")
+          .aggregate([
+            { $group: { _id: null, totalAmount: { $sum: "$amount" } } },
+          ])
+          .toArray();
+        const totalPayments = paymentsAgg[0]?.totalAmount || 0;
+
+        // Memberships per club (for chart)
+        const membershipsPerClub = await db
+          .collection("memberships")
+          .aggregate([
+            {
+              $addFields: { clubObjId: { $toObjectId: "$clubId" } }, // convert string to ObjectId
+            },
+            {
+              $group: {
+                _id: "$clubObjId",
+                totalMembers: { $sum: 1 },
+              },
+            },
+            {
+              $lookup: {
+                from: "clubs",
+                localField: "_id",
+                foreignField: "_id",
+                as: "club",
+              },
+            },
+            { $unwind: "$club" },
+            { $project: { clubName: "$club.clubName", totalMembers: 1 } },
+          ])
+          .toArray();
+        res.json({
+          totalUsers,
+          clubsSummary,
+          totalMemberships,
+          totalEvents,
+          totalPayments,
+          membershipsPerClub,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+    app.get("/manager-overview/:email", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+        const managerEmail = req.params.email;
+
+        // 1️⃣ Number of clubs managed
+        const numClubs = await db.collection("clubs").countDocuments({
+          "manager.email": managerEmail,
+        });
+
+        // 2️⃣ Total members in their clubs
+        // Convert string clubIds in memberships to ObjectId for lookup
+        const memberships = await db
+          .collection("memberships")
+          .aggregate([
+            {
+              $addFields: { clubObjId: { $toObjectId: "$clubId" } }, // convert string to ObjectId
+            },
+            {
+              $lookup: {
+                from: "clubs",
+                localField: "clubObjId",
+                foreignField: "_id",
+                as: "club",
+              },
+            },
+            { $unwind: "$club" },
+            { $match: { "club.manager.email": managerEmail } },
+            { $count: "totalMembers" },
+          ])
+          .toArray();
+
+        const totalMembers = memberships[0]?.totalMembers || 0;
+        // 3️⃣ Total events created
+        const totalEvents = await db.collection("events").countDocuments({
+          "manager.email": managerEmail,
+        });
+
+        // 4️⃣ Total payments received for their clubs
+        const paymentsAgg = await db
+          .collection("payments")
+          .aggregate([
+            {
+              $match: { "manager.email": managerEmail }, // payments for this manager
+            },
+            {
+              $group: {
+                _id: null,
+                totalAmount: { $sum: "$amount" },
+              },
+            },
+          ])
+          .toArray();
+        const totalPayments = paymentsAgg[0]?.totalAmount || 0;
+
+        res.json({
+          numClubs,
+          totalMembers,
+          totalEvents,
+          totalPayments,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+    app.get("/member-overview/:email", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+        const memberEmail = req.params.email;
+
+        // Total clubs joined
+        const totalClubsJoined = await db
+          .collection("memberships")
+          .countDocuments({
+            member: memberEmail,
+            status: "joined", // or include pending if needed
+          });
+
+        // Total events registered
+        const totalEventsRegistered = await db
+          .collection("eventRegisters")
+          .countDocuments({
+            userEmail: memberEmail, // assuming events have an attendees array
+          });
+
+        // Upcoming events from their clubs
+        const upcomingEvents = await db
+          .collection("events")
+          .aggregate([
+            {
+              $lookup: {
+                from: "memberships",
+                let: { eventClubId: { $toObjectId: "$clubId" } },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toObjectId: "$clubId" }, "$$eventClubId"],
+                      },
+                      member: memberEmail,
+                    },
+                  },
+                ],
+                as: "memberJoined",
+              },
+            },
+            { $match: { "memberJoined.0": { $exists: true } } }, // only events where member joined
+            { $sort: { eventDate: 1 } },
+            {
+              $project: {
+                title: 1,
+                eventDate: 1,
+                eventLocation: 1,
+                bannerImage: 1,
+              },
+            },
+          ])
+          .toArray();
+
+        res.json({
+          totalClubsJoined,
+          totalEventsRegistered,
+          upcomingEvents,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
     });
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
