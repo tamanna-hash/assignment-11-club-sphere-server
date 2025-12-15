@@ -187,6 +187,18 @@ async function run() {
         res.send(result);
       }
     );
+    app.delete(
+      "/club-delete/pending/:id",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const { id } = req.params;
+        const filter = { _id: new ObjectId(id) };
+        const result = await clubRequestCollection.deleteOne(filter);
+        res.send(result);
+      }
+    );
+
     // get all club requests for admin
     app.get("/club-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await clubRequestCollection.find().toArray();
@@ -1008,6 +1020,59 @@ async function run() {
         res.status(500).json({ message: "Server error" });
       }
     });
+    // by newest
+//     app.get("/featured-clubs", async (req, res) => {
+//   const result = await db
+//     .collection("clubs")
+//     .find({ status: "approved" })
+//     .sort({ created_at: -1 })
+//     .limit(6)
+//     .toArray();
+
+//   res.send(result);
+// });
+// by most people
+app.get("/featured-clubs-newest", async (req, res) => {
+  const result = await db.collection("memberships").aggregate([
+    { $match: { status: "joined" } },
+    {
+      $group: {
+        _id: "$clubId",
+        totalMembers: { $sum: 1 }
+      }
+    },
+    {
+      $lookup: {
+        from: "clubs",
+        let: { clubId: "$_id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: { $eq: ["$_id", { $toObjectId: "$$clubId" }] }
+            }
+          }
+        ],
+        as: "club"
+      }
+    },
+    { $unwind: "$club" },
+    { $sort: { totalMembers: -1 } },
+    { $limit: 6 },
+    {
+      $project: {
+        _id: 0,
+        clubId: "$club._id",
+        clubName: "$club.clubName",
+        category: "$club.category",
+        coverImage: "$club.coverImage",
+        totalMembers: 1
+      }
+    }
+  ]).toArray();
+
+  res.send(result);
+});
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
