@@ -492,6 +492,7 @@ async function run() {
         const email = req.tokenEmail;
         const query = { "manager.email": email };
         const result = await eventRegisterCollection.find(query).toArray();
+        console.log(result);
         res.send(result);
       }
     );
@@ -562,7 +563,7 @@ async function run() {
     // stripe checkout session
     app.post("/create-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
-      const { clubId, memberEmail } = paymentInfo;
+      const { clubId, memberEmail, transactionId } = paymentInfo;
 
       // 1. check existing payment FIRST
       const existingPayment = await paymentCollection.findOne({
@@ -654,7 +655,7 @@ async function run() {
         const paymentResult = await paymentCollection.insertOne(paymentInfo);
         return res.send({
           transactionId: session.payment_intent,
-          membershipId: result.insertedId,
+          membershipId: membershipResult.insertedId,
         });
       }
       return res.send({
@@ -683,11 +684,17 @@ async function run() {
     // memberships apis
     //  get all memberships for a customer by email
     app.get("/my-memberships", verifyJWT, async (req, res) => {
-      const result = await membershipCollection
-        .find({ member: req.tokenEmail })
-        .toArray();
+      const { clubId } = req.query;
+
+      const query = {
+        member: req.tokenEmail,
+        ...(clubId && { clubId }),
+      };
+
+      const result = await membershipCollection.find(query).toArray();
       res.send(result);
     });
+
     // get all memberships for manager by email
     app.get(
       "/manage-memberships",
@@ -1021,57 +1028,60 @@ async function run() {
       }
     });
     // by newest
-//     app.get("/featured-clubs", async (req, res) => {
-//   const result = await db
-//     .collection("clubs")
-//     .find({ status: "approved" })
-//     .sort({ created_at: -1 })
-//     .limit(6)
-//     .toArray();
+    //     app.get("/featured-clubs", async (req, res) => {
+    //   const result = await db
+    //     .collection("clubs")
+    //     .find({ status: "approved" })
+    //     .sort({ created_at: -1 })
+    //     .limit(6)
+    //     .toArray();
 
-//   res.send(result);
-// });
-// by most people
-app.get("/featured-clubs-newest", async (req, res) => {
-  const result = await db.collection("memberships").aggregate([
-    { $match: { status: "joined" } },
-    {
-      $group: {
-        _id: "$clubId",
-        totalMembers: { $sum: 1 }
-      }
-    },
-    {
-      $lookup: {
-        from: "clubs",
-        let: { clubId: "$_id" },
-        pipeline: [
+    //   res.send(result);
+    // });
+    // by most people
+    app.get("/featured-clubs-newest", async (req, res) => {
+      const result = await db
+        .collection("memberships")
+        .aggregate([
+          { $match: { status: "joined" } },
           {
-            $match: {
-              $expr: { $eq: ["$_id", { $toObjectId: "$$clubId" }] }
-            }
-          }
-        ],
-        as: "club"
-      }
-    },
-    { $unwind: "$club" },
-    { $sort: { totalMembers: -1 } },
-    { $limit: 6 },
-    {
-      $project: {
-        _id: 0,
-        clubId: "$club._id",
-        clubName: "$club.clubName",
-        category: "$club.category",
-        coverImage: "$club.coverImage",
-        totalMembers: 1
-      }
-    }
-  ]).toArray();
+            $group: {
+              _id: "$clubId",
+              totalMembers: { $sum: 1 },
+            },
+          },
+          {
+            $lookup: {
+              from: "clubs",
+              let: { clubId: "$_id" },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: { $eq: ["$_id", { $toObjectId: "$$clubId" }] },
+                  },
+                },
+              ],
+              as: "club",
+            },
+          },
+          { $unwind: "$club" },
+          { $sort: { totalMembers: -1 } },
+          { $limit: 6 },
+          {
+            $project: {
+              _id: 0,
+              clubId: "$club._id",
+              clubName: "$club.clubName",
+              category: "$club.category",
+              coverImage: "$club.coverImage",
+              totalMembers: 1,
+            },
+          },
+        ])
+        .toArray();
 
-  res.send(result);
-});
+      res.send(result);
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
