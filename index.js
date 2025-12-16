@@ -81,7 +81,7 @@ async function run() {
     };
     // club apis
     // get all clubs
-    app.get("/clubs", async (req, res) => {
+    app.get("as", async (req, res) => {
       try {
         const { search = "", category, sort } = req.query;
 
