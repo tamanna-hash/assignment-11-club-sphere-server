@@ -17,7 +17,7 @@ const app = express();
 // middleware
 app.use(
   cors({
-    origin: [process.env.CLIENT_DOMAIN],
+    origin: [process.env.CLIENT_DOMAIN, process.env.OTHER_CLIENT_DOMAIN],
     credentials: true,
     optionSuccessStatus: 200,
   })
@@ -83,21 +83,21 @@ async function run() {
     // get all clubs
     app.get("/clubs", async (req, res) => {
       try {
-        const { search = "", category, sort } = req.query;
+        const { search = "", category, sort, page = 1, limit = 9 } = req.query;
 
         const query = {};
 
-        // 🔍 Search by clubName
+        // 🔍 Search
         if (search) {
           query.clubName = { $regex: search, $options: "i" };
         }
 
-        // 🏷️ Filter by category
+        // 🏷️ Filter
         if (category && category !== "all") {
           query.category = category;
         }
 
-        // 🔃 Sorting logic
+        // 🔃 Sorting
         let sortOption = {};
         switch (sort) {
           case "newest":
@@ -113,15 +113,26 @@ async function run() {
             sortOption = { membershipFee: 1 };
             break;
           default:
-            sortOption = { created_at: -1 }; // default newest
+            sortOption = { created_at: -1 };
         }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const total = await clubCollection.countDocuments(query);
 
         const result = await clubCollection
           .find(query)
           .sort(sortOption)
+          .skip(skip)
+          .limit(parseInt(limit))
           .toArray();
 
-        res.send(result);
+        res.send({
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(total / limit),
+          data: result,
+        });
       } catch (error) {
         console.error(error);
         res.status(500).send({ message: "Failed to fetch clubs" });
@@ -642,7 +653,7 @@ async function run() {
           clubId: session.metadata.clubId,
           transactionId: session.payment_intent,
           userEmail: session.metadata.member,
-          status: "pending",
+          status: "paid",
           manager: club.manager,
           name: club.clubName,
           category: club.category,
@@ -674,6 +685,14 @@ async function run() {
       const result = await paymentCollection.find().toArray();
       res.send(result);
     });
+    // get payments for member by email
+    app.get("/my-payments", verifyJWT, async (req, res) => {
+      const email = req.tokenEmail;
+      const result = await paymentCollection
+        .find({ userEmail: email })
+        .toArray();
+      res.send(result);
+    });
     // get payments for manager by email
     app.get("/manager-payments", verifyJWT, verifyMANAGER, async (req, res) => {
       const email = req.tokenEmail;
@@ -702,9 +721,13 @@ async function run() {
       verifyMANAGER,
       async (req, res) => {
         const email = req.tokenEmail;
-        const result = await membershipCollection
-          .find({ "manager.email": email })
-          .toArray();
+        const query = { "manager.email": email };
+
+        if (req.query.status) {
+          const statuses = req.query.status.split(","); // "joined,pending"
+          query.status = { $in: statuses };
+        }
+        const result = await membershipCollection.find(query).toArray();
         res.send(result);
       }
     );
@@ -722,10 +745,40 @@ async function run() {
             joined_at: new Date(),
           },
         };
+
         const result = await membershipCollection.updateOne(query, updatedData);
         res.send(result);
       }
     );
+    app.patch(
+      "/memberships/:membershipId/expire",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        try {
+          const id = req.params.membershipId;
+          console.log(id);
+          // if (!ObjectId.isValid(id)) {
+          //   return res.status(400).send({ error: "Invalid membership ID" });
+          // }
+
+          const result = await membershipCollection.updateOne(
+            { _id:new ObjectId(id) },
+            { $set: { status: "expired" } }
+          );
+
+          if (result.modifiedCount === 1) {
+            res.send({ success: true, modifiedCount: 1  });
+          } else {
+            res.status(404).send({ error: "Membership not found" });
+          }
+        } catch (err) {
+          console.error("Error expiring membership:", err);
+          res.status(500).send({ error: "Internal Server Error" });
+        }
+      }
+    );
+
     // delete membership data if reject
     app.delete(
       "/membership-reject/:id",
@@ -1040,8 +1093,7 @@ async function run() {
     // });
     // by most people
     app.get("/featured-clubs-newest", async (req, res) => {
-      const result = await db
-        .collection("memberships")
+      const result = await membershipCollection
         .aggregate([
           { $match: { status: "joined" } },
           {
@@ -1084,10 +1136,10 @@ async function run() {
     });
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
   }
