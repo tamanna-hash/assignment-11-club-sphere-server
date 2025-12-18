@@ -58,6 +58,7 @@ async function run() {
     const userCollection = db.collection("users");
     const managerRequestCollection = db.collection("managerRequests");
     const clubRequestCollection = db.collection("clubRequests");
+    const wishlistCollection = db.collection("wishlists");
     // role middlewares
     const verifyADMIN = async (req, res, next) => {
       const email = req.tokenEmail;
@@ -763,12 +764,12 @@ async function run() {
           // }
 
           const result = await membershipCollection.updateOne(
-            { _id:new ObjectId(id) },
+            { _id: new ObjectId(id) },
             { $set: { status: "expired" } }
           );
 
           if (result.modifiedCount === 1) {
-            res.send({ success: true, modifiedCount: 1  });
+            res.send({ success: true, modifiedCount: 1 });
           } else {
             res.status(404).send({ error: "Membership not found" });
           }
@@ -1134,7 +1135,48 @@ async function run() {
 
       res.send(result);
     });
+    // get wishlist for members
+    app.get("/my-wishlist", verifyJWT, async (req, res) => {
+      const email = req.tokenEmail;
+      const query = { userEmail: email };
+      const result = await wishlistCollection.find(query).toArray();
+      res.send(result);
+    });
+    app.post("/my-wishlist", verifyJWT, async (req, res) => {
+      try {
+        const wishlist = req.body;
 
+        const result = await wishlistCollection.insertOne(wishlist);
+
+        if (result.insertedId) {
+          res.status(201).send({
+            success: true,
+            message: "Added to wishlist successfully",
+            insertedId: result.insertedId,
+          });
+        } else {
+          res.status(400).send({
+            success: false,
+            message: "Failed to add to wishlist",
+          });
+        }
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Server error while adding to wishlist",
+        });
+      }
+    });
+    // delete from wishlist
+    app.delete("/my-wishlist", verifyJWT, async (req, res) => {
+      const { userEmail, clubId } = req.body;
+      const result = await wishlistCollection.deleteOne({ userEmail, clubId });
+      if (result.deletedCount > 0) {
+        res.send({ success: true });
+      } else {
+        res.status(404).send({ success: false, message: "Not found" });
+      }
+    });
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
     // console.log(
