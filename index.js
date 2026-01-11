@@ -17,7 +17,11 @@ const app = express();
 // middleware
 app.use(
   cors({
-    origin: [process.env.CLIENT_DOMAIN, process.env.OTHER_CLIENT_DOMAIN],
+    origin: [
+      process.env.CLIENT_DOMAIN,
+      process.env.OTHER_CLIENT_DOMAIN,
+      process.env.LOCAL_HOST,
+    ],
     credentials: true,
     optionSuccessStatus: 200,
   })
@@ -59,6 +63,7 @@ async function run() {
     const managerRequestCollection = db.collection("managerRequests");
     const clubRequestCollection = db.collection("clubRequests");
     const wishlistCollection = db.collection("wishlists");
+    const notificationCollection = db.collection("notifications");
     // role middlewares
     const verifyADMIN = async (req, res, next) => {
       const email = req.tokenEmail;
@@ -80,11 +85,29 @@ async function run() {
 
       next();
     };
+    const blockDemoAdmin = (req, res, next) => {
+      if (req.tokenEmail === "admin@gmail.com") {
+        return res.status(403).send({
+          message: "Demo mode: destructive actions are disabled",
+        });
+      }
+      next();
+    };
+    const blockDemoManager = (req, res, next) => {
+      // email comes from verified JWT
+      if (req.tokenEmail === "jhankar@gmail.com") {
+        return res.status(403).send({
+          message: "Demo manager: destructive actions are disabled",
+        });
+      }
+      next();
+    };
+
     // club apis
     // get all clubs
     app.get("/clubs", async (req, res) => {
       try {
-        const { search = "", category, sort, page = 1, limit = 9 } = req.query;
+        const { search = "", category, sort, page = 1, limit = 12 } = req.query;
 
         const query = {};
 
@@ -168,7 +191,7 @@ async function run() {
       res.send(result);
     });
     // post approve club
-    app.post("/clubs-approve/:id", verifyJWT, verifyADMIN, async (req, res) => {
+    app.post("/clubs-approve/:id", verifyJWT, verifyADMIN,blockDemoAdmin, async (req, res) => {
       const club = req.body;
       const id = req.params.id;
 
@@ -192,6 +215,7 @@ async function run() {
       "/clubs-reject/:id",
       verifyJWT,
       verifyADMIN,
+      blockDemoAdmin,
       async (req, res) => {
         const { id } = req.params;
         const filter = { _id: new ObjectId(id) };
@@ -203,6 +227,7 @@ async function run() {
       "/club-delete/pending/:id",
       verifyJWT,
       verifyMANAGER,
+      blockDemoManager,
       async (req, res) => {
         const { id } = req.params;
         const filter = { _id: new ObjectId(id) };
@@ -268,7 +293,7 @@ async function run() {
       async (req, res) => {
         const { id } = req.params;
         const clubData = req.body;
-        console.log(clubData);
+        // console.log(clubData);
         const query = { _id: new ObjectId(id) };
         delete clubData._id;
         const updatedData = { $set: clubData };
@@ -298,6 +323,7 @@ async function run() {
       "/clubs-delete/:id",
       verifyJWT,
       verifyMANAGER,
+      blockDemoManager,
       async (req, res) => {
         try {
           const { id } = req.params;
@@ -369,9 +395,41 @@ async function run() {
     // event api
     app.post("/events", verifyJWT, verifyMANAGER, async (req, res) => {
       const eventData = req.body;
-      console.log(eventData);
+      // console.log(eventData);
       eventData.created_at = new Date();
       const result = await eventCollection.insertOne(eventData);
+
+      // Create notifications for all club members when a new event is created
+      if (result.insertedId) {
+        try {
+          const clubMembers = await membershipCollection
+            .find({
+              clubId: eventData.clubId,
+              status: "joined",
+            })
+            .toArray();
+
+          const notifications = clubMembers.map((member) => ({
+            userId: member.member,
+            type: "event_created",
+            title: "New Event Created!",
+            message: `A new event "${eventData.title}" has been created in ${eventData.clubName}. Check it out!`,
+            clubName: eventData.clubName,
+            clubId: eventData.clubId,
+            eventId: result.insertedId.toString(),
+            eventTitle: eventData.title,
+            isRead: false,
+            createdAt: new Date(),
+          }));
+
+          if (notifications.length > 0) {
+            await notificationCollection.insertMany(notifications);
+          }
+        } catch (error) {
+          console.error("Error creating event notifications:", error);
+        }
+      }
+
       res.send(result);
     });
     // get all events public
@@ -471,7 +529,7 @@ async function run() {
     app.post("/event-registration", async (req, res) => {
       const { eventId, userEmail, clubId, manager } = req.body;
       // check if already joined
-      console.log(req.body);
+      // console.log(req.body);
       const existing = await eventRegisterCollection.findOne({
         eventId,
         userEmail,
@@ -494,6 +552,35 @@ async function run() {
       };
 
       const result = await eventRegisterCollection.insertOne(eventRegisterData);
+
+      // Create notification for manager when someone registers for their event
+      if (result.insertedId) {
+        try {
+          const event = await eventCollection.findOne({
+            _id: new ObjectId(eventId),
+          });
+          if (event && manager?.email) {
+            const notification = {
+              userId: manager.email,
+              type: "event_registration",
+              title: "New Event Registration!",
+              message: `${userEmail} has registered for your event "${event.title}".`,
+              clubName: event.clubName,
+              clubId: clubId,
+              eventId: eventId,
+              eventTitle: event.title,
+              memberEmail: userEmail,
+              isRead: false,
+              createdAt: new Date(),
+            };
+
+            await notificationCollection.insertOne(notification);
+          }
+        } catch (error) {
+          console.error("Error creating registration notification:", error);
+        }
+      }
+
       res.send(result);
     });
     app.get(
@@ -504,7 +591,7 @@ async function run() {
         const email = req.tokenEmail;
         const query = { "manager.email": email };
         const result = await eventRegisterCollection.find(query).toArray();
-        console.log(result);
+        // console.log(result);
         res.send(result);
       }
     );
@@ -512,6 +599,7 @@ async function run() {
       "/event-register-remove/:id",
       verifyJWT,
       verifyMANAGER,
+      blockDemoManager,
       async (req, res) => {
         const managerEmail = req.tokenEmail;
         const { id } = req.params;
@@ -665,6 +753,46 @@ async function run() {
           membershipInfo
         );
         const paymentResult = await paymentCollection.insertOne(paymentInfo);
+
+        // Create notifications for payment received
+        try {
+          // Notification for manager about payment received
+          const managerNotification = {
+            userId: club.manager.email,
+            type: "payment_received",
+            title: "Payment Received!",
+            message: `You received a payment of $${
+              session.amount_total / 100
+            } for ${club.clubName} membership from ${session.metadata.member}.`,
+            clubName: club.clubName,
+            clubId: session.metadata.clubId,
+            amount: session.amount_total / 100,
+            memberEmail: session.metadata.member,
+            isRead: false,
+            createdAt: new Date(),
+          };
+
+          // Notification for member about membership request
+          const memberNotification = {
+            userId: session.metadata.member,
+            type: "membership_request",
+            title: "Membership Request Submitted!",
+            message: `Your membership request for ${club.clubName} has been submitted and payment received. Waiting for manager approval.`,
+            clubName: club.clubName,
+            clubId: session.metadata.clubId,
+            amount: session.amount_total / 100,
+            isRead: false,
+            createdAt: new Date(),
+          };
+
+          await notificationCollection.insertMany([
+            managerNotification,
+            memberNotification,
+          ]);
+        } catch (error) {
+          console.error("Error creating payment notifications:", error);
+        }
+
         return res.send({
           transactionId: session.payment_intent,
           membershipId: membershipResult.insertedId,
@@ -679,6 +807,31 @@ async function run() {
     app.post("/membership-free", async (req, res) => {
       const membershipInfo = req.body;
       const result = await membershipCollection.insertOne(membershipInfo);
+
+      // Create notification for manager about new free membership request
+      if (result.insertedId && membershipInfo.manager?.email) {
+        try {
+          const notification = {
+            userId: membershipInfo.manager.email,
+            type: "membership_request",
+            title: "New Membership Request!",
+            message: `${membershipInfo.member} has requested to join ${membershipInfo.name}. Please review and approve.`,
+            clubName: membershipInfo.name,
+            clubId: membershipInfo.clubId,
+            memberEmail: membershipInfo.member,
+            isRead: false,
+            createdAt: new Date(),
+          };
+
+          await notificationCollection.insertOne(notification);
+        } catch (error) {
+          console.error(
+            "Error creating membership request notification:",
+            error
+          );
+        }
+      }
+
       res.send(result);
     });
     // get all payments for admin
@@ -715,7 +868,6 @@ async function run() {
       res.send(result);
     });
 
-    // get all memberships for manager by email
     app.get(
       "/manage-memberships",
       verifyJWT,
@@ -725,13 +877,21 @@ async function run() {
         const query = { "manager.email": email };
 
         if (req.query.status) {
-          const statuses = req.query.status.split(","); // "joined,pending"
+          const statuses = req.query.status.split(",");
           query.status = { $in: statuses };
         }
-        const result = await membershipCollection.find(query).toArray();
+
+        const result = await membershipCollection
+          .find(query)
+          .sort({
+            joined_at: 1,
+          })
+          .toArray();
+
         res.send(result);
       }
     );
+
     // update membership data after approve
     app.patch(
       "/manage-membership/:id",
@@ -740,6 +900,10 @@ async function run() {
       async (req, res) => {
         const { id } = req.params;
         const query = { _id: new ObjectId(id) };
+
+        // Get membership details before updating
+        const membership = await membershipCollection.findOne(query);
+
         const updatedData = {
           $set: {
             status: "joined",
@@ -748,6 +912,23 @@ async function run() {
         };
 
         const result = await membershipCollection.updateOne(query, updatedData);
+
+        // Create notification for the member
+        if (result.modifiedCount > 0 && membership) {
+          const notification = {
+            userId: membership.member,
+            type: "membership_approved",
+            title: "Membership Approved!",
+            message: `Your membership to ${membership.name} has been approved. Welcome to the club!`,
+            clubName: membership.name,
+            clubId: membership.clubId,
+            isRead: false,
+            createdAt: new Date(),
+          };
+
+          await notificationCollection.insertOne(notification);
+        }
+
         res.send(result);
       }
     );
@@ -758,7 +939,7 @@ async function run() {
       async (req, res) => {
         try {
           const id = req.params.membershipId;
-          console.log(id);
+          // console.log(id);
           // if (!ObjectId.isValid(id)) {
           //   return res.status(400).send({ error: "Invalid membership ID" });
           // }
@@ -785,6 +966,7 @@ async function run() {
       "/membership-reject/:id",
       verifyJWT,
       verifyMANAGER,
+      blockDemoManager,
       async (req, res) => {
         try {
           const { id } = req.params;
@@ -816,10 +998,10 @@ async function run() {
       };
 
       const alreadyExists = await userCollection.findOne(query);
-      console.log("User Already Exists---> ", !!alreadyExists);
+      // console.log("User Already Exists---> ", !!alreadyExists);
 
       if (alreadyExists) {
-        console.log("Updating user info......");
+        // console.log("Updating user info......");
         const result = await userCollection.updateOne(query, {
           $set: {
             last_loggedIn: new Date().toISOString(),
@@ -828,14 +1010,14 @@ async function run() {
         return res.send(result);
       }
 
-      console.log("Saving new user info......");
+      // console.log("Saving new user info......");
       const result = await userCollection.insertOne(userData);
       res.send(result);
     });
     // get all users for admin
     app.get("/users", verifyJWT, verifyADMIN, async (req, res) => {
       const adminEmail = req.tokenEmail;
-      console.log(adminEmail);
+      // console.log(adminEmail);
       const result = await userCollection
         .find({ email: { $ne: adminEmail } })
         .toArray();
@@ -843,7 +1025,7 @@ async function run() {
     });
     // get a user's role
     app.get("/user/role", verifyJWT, async (req, res) => {
-      //  console.log(req.tokenEmail)
+      // console.log(req.tokenEmail);
       const result = await userCollection.findOne({ email: req.tokenEmail });
       res.send({ role: result?.role });
     });
@@ -866,16 +1048,22 @@ async function run() {
     });
 
     // update a user's role
-    app.patch("/update-role", verifyJWT, verifyADMIN, async (req, res) => {
-      const { email, role } = req.body;
-      const result = await userCollection.updateOne(
-        { email },
-        { $set: { role } }
-      );
-      await managerRequestCollection.deleteOne({ email });
+    app.patch(
+      "/update-role",
+      verifyJWT,
+      verifyADMIN,
+      blockDemoAdmin,
+      async (req, res) => {
+        const { email, role } = req.body;
+        const result = await userCollection.updateOne(
+          { email },
+          { $set: { role } }
+        );
+        await managerRequestCollection.deleteOne({ email });
 
-      res.send(result);
-    });
+        res.send(result);
+      }
+    );
     app.get("/admin-summary", async (req, res) => {
       try {
         const db = client.db("clubSphereDB");
@@ -961,13 +1149,20 @@ async function run() {
           "manager.email": managerEmail,
         });
 
-        // 2️⃣ Total members in their clubs
-        // Convert string clubIds in memberships to ObjectId for lookup
+        // 2️⃣ Total members in their clubs (only joined status)
         const memberships = await db
           .collection("memberships")
           .aggregate([
             {
-              $addFields: { clubObjId: { $toObjectId: "$clubId" } }, // convert string to ObjectId
+              $addFields: {
+                clubObjId: {
+                  $cond: [
+                    { $eq: [{ $type: "$clubId" }, "string"] },
+                    { $toObjectId: "$clubId" },
+                    "$clubId",
+                  ],
+                },
+              },
             },
             {
               $lookup: {
@@ -978,12 +1173,18 @@ async function run() {
               },
             },
             { $unwind: "$club" },
-            { $match: { "club.manager.email": managerEmail } },
+            {
+              $match: {
+                "club.manager.email": managerEmail,
+                status: "joined", // Only count active members
+              },
+            },
             { $count: "totalMembers" },
           ])
           .toArray();
 
         const totalMembers = memberships[0]?.totalMembers || 0;
+
         // 3️⃣ Total events created
         const totalEvents = await db.collection("events").countDocuments({
           "manager.email": managerEmail,
@@ -994,7 +1195,10 @@ async function run() {
           .collection("payments")
           .aggregate([
             {
-              $match: { "manager.email": managerEmail }, // payments for this manager
+              $match: {
+                "manager.email": managerEmail,
+                status: "paid", // Only count successful payments
+              },
             },
             {
               $group: {
@@ -1006,17 +1210,398 @@ async function run() {
           .toArray();
         const totalPayments = paymentsAgg[0]?.totalAmount || 0;
 
+        // 5️⃣ Additional metrics for better insights
+        const pendingMemberships = await db
+          .collection("memberships")
+          .countDocuments({
+            "manager.email": managerEmail,
+            status: "pending",
+          });
+
+        const upcomingEvents = await db.collection("events").countDocuments({
+          "manager.email": managerEmail,
+          eventDate: { $gte: new Date() },
+        });
+
         res.json({
           numClubs,
           totalMembers,
           totalEvents,
           totalPayments,
+          pendingMemberships,
+          upcomingEvents,
         });
       } catch (err) {
         console.error(err);
         res.status(500).json({ message: "Server error" });
       }
     });
+    // GET members per club for a manager
+    app.get("/manager-members-per-club/:email", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+        const managerEmail = req.params.email;
+
+        const clubs = await db
+          .collection("clubs")
+          .find({ "manager.email": managerEmail })
+          .toArray();
+
+        const membersPerClub = await Promise.all(
+          clubs.map(async (club) => {
+            const memberCount = await db
+              .collection("memberships")
+              .countDocuments({
+                clubId: club._id.toString(),
+                status: "joined", // Only count active members
+              });
+
+            return {
+              label: club.clubName || club.name, // Handle both field names
+              value: memberCount,
+              clubId: club._id.toString(),
+              category: club.category,
+            };
+          })
+        );
+
+        // Filter out clubs with 0 members for cleaner visualization
+        const filteredData = membersPerClub.filter((club) => club.value > 0);
+
+        res.json(filteredData);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // GET clubs vs events for manager (for bar chart)
+    app.get("/manager-chart/:email", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+        const managerEmail = req.params.email;
+
+        // Count clubs managed
+        const numClubs = await db.collection("clubs").countDocuments({
+          "manager.email": managerEmail,
+        });
+
+        // Count events created
+        const numEvents = await db.collection("events").countDocuments({
+          "manager.email": managerEmail,
+        });
+
+        // Count active memberships
+        const activeMemberships = await db
+          .collection("memberships")
+          .countDocuments({
+            "manager.email": managerEmail,
+            status: "joined",
+          });
+
+        // Count total revenue
+        const revenueAgg = await db
+          .collection("payments")
+          .aggregate([
+            { $match: { "manager.email": managerEmail, status: "paid" } },
+            { $group: { _id: null, total: { $sum: "$amount" } } },
+          ])
+          .toArray();
+        const totalRevenue = revenueAgg[0]?.total || 0;
+
+        // Format for chart with more meaningful data
+        const chartData = [
+          { label: "Clubs", value: numClubs, color: "#8b5cf6" },
+          { label: "Events", value: numEvents, color: "#06b6d4" },
+          { label: "Members", value: activeMemberships, color: "#10b981" },
+          {
+            label: "Revenue ($)",
+            value: Math.round(totalRevenue),
+            color: "#f59e0b",
+          },
+        ];
+
+        res.json(chartData);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // GET manager growth stats (Line Chart)
+    app.get("/manager-growth/:email", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+        const managerEmail = req.params.email;
+
+        const now = new Date();
+        const startDate = new Date();
+        startDate.setMonth(now.getMonth() - 5);
+        startDate.setHours(0, 0, 0, 0);
+
+        const monthNames = [
+          "Jan",
+          "Feb",
+          "Mar",
+          "Apr",
+          "May",
+          "Jun",
+          "Jul",
+          "Aug",
+          "Sep",
+          "Oct",
+          "Nov",
+          "Dec",
+        ];
+
+        // MEMBERS (monthly) - use joined_at field if available, otherwise createdAt
+        const membersAgg = await db
+          .collection("memberships")
+          .aggregate([
+            {
+              $match: {
+                "manager.email": managerEmail,
+                status: "joined",
+                $or: [
+                  { joined_at: { $gte: startDate } },
+                  { createdAt: { $gte: startDate } },
+                ],
+              },
+            },
+            {
+              $addFields: {
+                dateField: {
+                  $ifNull: ["$joined_at", "$createdAt"],
+                },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  year: { $year: "$dateField" },
+                  month: { $month: "$dateField" },
+                },
+                count: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray();
+
+        // EVENTS (monthly)
+        const eventsAgg = await db
+          .collection("events")
+          .aggregate([
+            {
+              $match: {
+                "manager.email": managerEmail,
+                created_at: { $gte: startDate },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  year: { $year: "$created_at" },
+                  month: { $month: "$created_at" },
+                },
+                count: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray();
+
+        let cumulativeMembers = 0;
+        let cumulativeEvents = 0;
+
+        const growthData = Array.from({ length: 6 }).map((_, index) => {
+          const date = new Date();
+          date.setMonth(now.getMonth() - (5 - index));
+
+          const year = date.getFullYear();
+          const month = date.getMonth() + 1;
+
+          const membersThisMonth =
+            membersAgg.find((m) => m._id.year === year && m._id.month === month)
+              ?.count || 0;
+
+          const eventsThisMonth =
+            eventsAgg.find((e) => e._id.year === year && e._id.month === month)
+              ?.count || 0;
+
+          cumulativeMembers += membersThisMonth;
+          cumulativeEvents += eventsThisMonth;
+
+          return {
+            label: monthNames[date.getMonth()],
+            members: membersThisMonth,
+            events: eventsThisMonth,
+            totalMembers: cumulativeMembers,
+            totalEvents: cumulativeEvents,
+          };
+        });
+
+        // Growth comparison (last vs previous)
+        const last = growthData[growthData.length - 1];
+        const prev = growthData[growthData.length - 2] || last;
+
+        const memberGrowthRate =
+          prev.members === 0
+            ? last.members > 0
+              ? 100
+              : 0
+            : (((last.members - prev.members) / prev.members) * 100).toFixed(1);
+
+        const eventGrowthRate =
+          prev.events === 0
+            ? last.events > 0
+              ? 100
+              : 0
+            : (((last.events - prev.events) / prev.events) * 100).toFixed(1);
+
+        res.json({
+          growthData,
+          insights: {
+            memberGrowthRate: Number(memberGrowthRate),
+            eventGrowthRate: Number(eventGrowthRate),
+          },
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // NEW: GET member demographics for manager
+    app.get("/manager-demographics/:email", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+        const managerEmail = req.params.email;
+
+        // Get member demographics by club category
+        const demographics = await db
+          .collection("memberships")
+          .aggregate([
+            {
+              $addFields: {
+                clubObjId: {
+                  $cond: [
+                    { $eq: [{ $type: "$clubId" }, "string"] },
+                    { $toObjectId: "$clubId" },
+                    "$clubId",
+                  ],
+                },
+              },
+            },
+            {
+              $lookup: {
+                from: "clubs",
+                localField: "clubObjId",
+                foreignField: "_id",
+                as: "club",
+              },
+            },
+            { $unwind: "$club" },
+            {
+              $match: {
+                "club.manager.email": managerEmail,
+                status: "joined",
+              },
+            },
+            {
+              $group: {
+                _id: "$club.category",
+                count: { $sum: 1 },
+              },
+            },
+            {
+              $project: {
+                category: "$_id",
+                count: 1,
+                _id: 0,
+              },
+            },
+          ])
+          .toArray();
+
+        res.json(demographics);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // NEW: GET recent activity for manager
+    app.get("/manager-recent-activity/:email", async (req, res) => {
+      try {
+        const db = client.db("clubSphereDB");
+        const managerEmail = req.params.email;
+
+        // Get recent memberships
+        const recentMemberships = await db
+          .collection("memberships")
+          .aggregate([
+            {
+              $addFields: {
+                clubObjId: {
+                  $cond: [
+                    { $eq: [{ $type: "$clubId" }, "string"] },
+                    { $toObjectId: "$clubId" },
+                    "$clubId",
+                  ],
+                },
+              },
+            },
+            {
+              $lookup: {
+                from: "clubs",
+                localField: "clubObjId",
+                foreignField: "_id",
+                as: "club",
+              },
+            },
+            { $unwind: "$club" },
+            {
+              $match: {
+                "club.manager.email": managerEmail,
+              },
+            },
+            {
+              $sort: { joined_at: -1, createdAt: -1 },
+            },
+            {
+              $limit: 10,
+            },
+            {
+              $project: {
+                member: 1,
+                status: 1,
+                clubName: "$club.clubName",
+                joinedAt: { $ifNull: ["$joined_at", "$createdAt"] },
+                fee: 1,
+              },
+            },
+          ])
+          .toArray();
+
+        // Get recent events
+        const recentEvents = await db
+          .collection("events")
+          .find({
+            "manager.email": managerEmail,
+          })
+          .sort({ created_at: -1 })
+          .limit(5)
+          .toArray();
+
+        res.json({
+          recentMemberships,
+          recentEvents,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
     app.get("/member-overview/:email", async (req, res) => {
       try {
         const db = client.db("clubSphereDB");
@@ -1177,15 +1762,84 @@ async function run() {
         res.status(404).send({ success: false, message: "Not found" });
       }
     });
-    // Send a ping to confirm a successful connection
-    // await client.db("admin").command({ ping: 1 });
-    // console.log(
-    //   "Pinged your deployment. You successfully connected to MongoDB!"
-    // );
-  } finally {
-    // Ensures that the client will close when you finish/error
+
+    // ===== NOTIFICATION ENDPOINTS =====
+
+    // Get notifications for a user
+    app.get("/notifications/:email", verifyJWT, async (req, res) => {
+      try {
+        const userEmail = req.params.email;
+        const notifications = await notificationCollection
+          .find({ userId: userEmail })
+          .sort({ createdAt: -1 })
+          .limit(20)
+          .toArray();
+
+        res.send(notifications);
+      } catch (error) {
+        console.error("Error fetching notifications:", error);
+        res.status(500).send({ message: "Failed to fetch notifications" });
+      }
+    });
+
+    // Mark notification as read
+    app.patch("/notifications/:id/read", verifyJWT, async (req, res) => {
+      try {
+        const notificationId = req.params.id;
+        const result = await notificationCollection.updateOne(
+          { _id: new ObjectId(notificationId) },
+          { $set: { isRead: true, readAt: new Date() } }
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.error("Error marking notification as read:", error);
+        res.status(500).send({ message: "Failed to update notification" });
+      }
+    });
+
+    // Mark all notifications as read for a user
+    app.patch("/notifications/:email/read-all", verifyJWT, async (req, res) => {
+      try {
+        const userEmail = req.params.email;
+        const result = await notificationCollection.updateMany(
+          { userId: userEmail, isRead: false },
+          { $set: { isRead: true, readAt: new Date() } }
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.error("Error marking all notifications as read:", error);
+        res.status(500).send({ message: "Failed to update notifications" });
+      }
+    });
+
+    // Get unread notification count
+    app.get(
+      "/notifications/:email/unread-count",
+      verifyJWT,
+      async (req, res) => {
+        try {
+          const userEmail = req.params.email;
+          const count = await notificationCollection.countDocuments({
+            userId: userEmail,
+            isRead: false,
+          });
+
+          res.send({ count });
+        } catch (error) {
+          console.error("Error getting unread count:", error);
+          res.status(500).send({ message: "Failed to get unread count" });
+        }
+      }
+    );
+  } catch (error) {
+    console.error("Database connection error:", error);
   }
 }
+
+// ===== CONTACT FORM ENDPOINT =====
+
 run().catch(console.dir);
 
 app.get("/", (req, res) => {
